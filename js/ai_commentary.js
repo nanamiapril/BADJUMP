@@ -249,7 +249,8 @@ const AIState = {
 };
 
 const VoiceState = {
-    enabled: true,
+    enabled: false,
+    unlocked: false,
     voice: null,
     rate: 0.96,
     pitch: 0.92,
@@ -260,63 +261,110 @@ function initVoice() {
     if (!('speechSynthesis' in window)) {
         console.warn('TTS not supported in this browser.');
         VoiceState.enabled = false;
+        VoiceState.unlocked = false;
         return;
     }
 
     function loadVoices() {
-        const voices = speechSynthesis.getVoices();
+        const voices = window.speechSynthesis.getVoices();
         console.log('voices loaded:', voices);
 
         const preferredVoice =
             voices.find(v => v.lang === 'en-GB') ||
             voices.find(v => v.lang === 'en-US') ||
-            voices.find(v => v.lang.startsWith('en'));
+            voices.find(v => v.lang && v.lang.startsWith('en'));
 
         VoiceState.voice = preferredVoice || null;
 
         if (!VoiceState.voice) {
-            console.warn('No English voice found.');
+            console.warn('No English voice found. Browser default voice will be used.');
         }
     }
 
     loadVoices();
-    speechSynthesis.onvoiceschanged = loadVoices;
+    window.speechSynthesis.onvoiceschanged = loadVoices;
 }
 
-
-function speakAIComment(text) {
-    if (!VoiceState.enabled || !text) return;
-    if (!('speechSynthesis' in window)) return;
-
-    // 如果正在说话，不要打断，只保留最新一句待播
-    if (speechSynthesis.speaking || speechSynthesis.pending) {
-        pendingVoiceText = text;
+function unlockVoice() {
+    if (!('speechSynthesis' in window)) {
+        console.warn('TTS not supported in this browser.');
         return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'en-US';
-    utterance.rate = VoiceState.rate;
-    utterance.pitch = VoiceState.pitch;
-    utterance.volume = VoiceState.volume;
+    if (VoiceState.unlocked) return;
 
-    if (VoiceState.voice) {
-        utterance.voice = VoiceState.voice;
-    }
+    VoiceState.enabled = true;
+    VoiceState.unlocked = true;
 
-    utterance.onend = () => {
-        if (pendingVoiceText) {
-            const nextText = pendingVoiceText;
-            pendingVoiceText = null;
-            speakAIComment(nextText);
+    try {
+        const unlockUtterance = new SpeechSynthesisUtterance(' ');
+        unlockUtterance.volume = 0;
+        unlockUtterance.rate = 1;
+        unlockUtterance.pitch = 1;
+
+        if (VoiceState.voice) {
+            unlockUtterance.voice = VoiceState.voice;
         }
+
+        window.speechSynthesis.speak(unlockUtterance);
+        console.log('Voice unlocked');
+    } catch (err) {
+        console.warn('Voice unlock failed:', err);
+    }
+}
+
+function bindVoiceUnlock() {
+    const unlockOnce = () => {
+        unlockVoice();
+
+        document.removeEventListener('touchstart', unlockOnce);
+        document.removeEventListener('click', unlockOnce);
+        document.removeEventListener('keydown', unlockOnce);
     };
 
-    utterance.onerror = () => {
-        pendingVoiceText = null;
-    };
+    document.addEventListener('touchstart', unlockOnce, { passive: true });
+    document.addEventListener('click', unlockOnce);
+    document.addEventListener('keydown', unlockOnce);
+}
 
-    speechSynthesis.speak(utterance);
+function speakAIComment(text) {
+    if (!text) return;
+    if (!('speechSynthesis' in window)) return;
+    if (!VoiceState.enabled || !VoiceState.unlocked) return;
+
+    try {
+        if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+            pendingVoiceText = text;
+            return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'en-US';
+        utterance.rate = VoiceState.rate;
+        utterance.pitch = VoiceState.pitch;
+        utterance.volume = VoiceState.volume;
+
+        if (VoiceState.voice) {
+            utterance.voice = VoiceState.voice;
+        }
+
+        utterance.onend = () => {
+            if (pendingVoiceText) {
+                const nextText = pendingVoiceText;
+                pendingVoiceText = null;
+                speakAIComment(nextText);
+            }
+        };
+
+        utterance.onerror = (e) => {
+            console.warn('Speech error:', e);
+            pendingVoiceText = null;
+        };
+
+        window.speechSynthesis.speak(utterance);
+    } catch (err) {
+        console.warn('speakAIComment failed:', err);
+    }
 }
 
 function initAICommentary() {
@@ -329,19 +377,11 @@ function initAICommentary() {
     AIState.recentTypes = [];
 }
 
-/**
- * Push item into rolling history
- */
 function pushRecent(arr, value, limit) {
     arr.push(value);
     if (arr.length > limit) arr.shift();
 }
 
-/**
- * Get filtered candidate lines:
- * - avoid recent exact repeats
- * - avoid saying same line twice in a row
- */
 function getCommentCandidates(commentType) {
     const comments = CommentLibrary[commentType];
     if (!comments || comments.length === 0) return [];
@@ -362,10 +402,6 @@ function getCommentCandidates(commentType) {
     return candidates;
 }
 
-/**
- * Slight variety helper:
- * very small chance to prefix with a short reaction
- */
 function addFlavor(text) {
     const prefixes = [
         "",
@@ -380,12 +416,6 @@ function addFlavor(text) {
     return prefix + text;
 }
 
-/**
- * Smarter trigger:
- * - cooldown
- * - avoid hammering same category too often
- * - choose less repeated lines
- */
 function triggerAIComment(commentType, data = {}) {
     const currentTime = Date.now();
 
@@ -396,7 +426,6 @@ function triggerAIComment(commentType, data = {}) {
     const comments = CommentLibrary[commentType];
     if (!comments || comments.length === 0) return;
 
-    // 避免同类型连续刷屏
     const sameTypeTooMuch =
         AIState.recentTypes.length >= 2 &&
         AIState.recentTypes[AIState.recentTypes.length - 1] === commentType &&
@@ -421,6 +450,7 @@ function triggerAIComment(commentType, data = {}) {
     let comment = availableComments[randomIndex];
 
     comment = personalizeComment(comment, commentType, data);
+    comment = addFlavor(comment);
 
     displayAIComment(comment);
 
@@ -428,21 +458,10 @@ function triggerAIComment(commentType, data = {}) {
     AIState.lastCommentText = comment;
     AIState.lastCommentType = commentType;
 
-    AIState.recentComments.push(comment);
-    if (AIState.recentComments.length > AIState.recentLimit) {
-        AIState.recentComments.shift();
-    }
-
-    AIState.recentTypes.push(commentType);
-    if (AIState.recentTypes.length > 6) {
-        AIState.recentTypes.shift();
-    }
+    pushRecent(AIState.recentComments, comment, AIState.recentLimit);
+    pushRecent(AIState.recentTypes, commentType, 6);
 }
 
-/**
- * Optional tiny dynamic flavor
- * Keep it short. No long sentence generation.
- */
 function personalizeComment(comment, commentType, data = {}) {
     if (commentType === 'score_milestone' && data.score) {
         if (data.score >= 20 && Math.random() < 0.2) {
@@ -468,28 +487,36 @@ function displayAIComment(comment) {
     const subtitleElement = document.getElementById('ai-subtitle');
     const avatarElement = document.getElementById('ai-avatar');
 
-    // 先清掉上一个隐藏计时器，避免多个 setTimeout 打架
     if (subtitleTimeoutId) {
         clearTimeout(subtitleTimeoutId);
         subtitleTimeoutId = null;
     }
 
-    subtitleElement.textContent = comment;
-    subtitleElement.style.opacity = '1';
+    if (subtitleElement) {
+        subtitleElement.textContent = comment;
+        subtitleElement.style.opacity = '1';
+    }
 
     speakAIComment(comment);
 
-    const faces = ['[+_+]', '[>_<]', '[@_@]', '[^_^]', '[¬_¬]', '[o_o]'];
-    avatarElement.textContent = faces[Math.floor(Math.random() * faces.length)];
-    avatarElement.style.transform = 'translateY(-2px)';
+    if (avatarElement) {
+        const faces = ['[+_+]', '[>_<]', '[@_@]', '[^_^]', '[¬_¬]', '[o_o]'];
+        avatarElement.textContent = faces[Math.floor(Math.random() * faces.length)];
+        avatarElement.style.transform = 'translateY(-2px)';
+    }
 
-    // 根据字数动态决定显示时长
     const displayDuration = Math.max(1800, Math.min(3200, comment.length * 85));
 
     subtitleTimeoutId = setTimeout(() => {
-        subtitleElement.style.opacity = '0';
-        avatarElement.textContent = '[-_-]';
-        avatarElement.style.transform = 'translateY(0)';
+        if (subtitleElement) {
+            subtitleElement.style.opacity = '0';
+        }
+
+        if (avatarElement) {
+            avatarElement.textContent = '[-_-]';
+            avatarElement.style.transform = 'translateY(0)';
+        }
+
         subtitleTimeoutId = null;
     }, displayDuration);
 }
@@ -498,26 +525,30 @@ function updateAICommentary(deltaTime) {
     // reserved for future pacing logic
 }
 
-/**
- * Idle banter now uses the main library,
- * so it also benefits from anti-repeat logic.
- */
 function addRandomComment() {
     triggerAIComment('idle_banter');
 }
 
-/**
- * Periodic idle banter
- * Lower frequency, and only when game is running
- */
 setInterval(() => {
     if (typeof GameState === 'undefined') return;
     if (!GameState.isRunning) return;
     if (!('speechSynthesis' in window)) return;
-    if (speechSynthesis.speaking || speechSynthesis.pending) return;
+    if (!VoiceState.enabled || !VoiceState.unlocked) return;
+    if (window.speechSynthesis.speaking || window.speechSynthesis.pending) return;
 
     const randomChance = Math.random();
     if (randomChance < 0.12) {
         triggerAIComment('idle_banter');
     }
 }, 18000);
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        pendingVoiceText = null;
+    }
+});
+
+initVoice();
+bindVoiceUnlock();
+initAICommentary();
