@@ -552,3 +552,15 @@ document.addEventListener('visibilitychange', () => {
 initVoice();
 bindVoiceUnlock();
 initAICommentary();
+
+document.addEventListener('DOMContentLoaded', () => {
+    const testBtn = document.getElementById('test-voice-btn');
+    if (testBtn) {
+        testBtn.addEventListener('click', () => {
+            unlockVoice();
+            setTimeout(() => {
+                speakAIComment('Testing AI voice.');
+            }, 200);
+        });
+    }
+});
